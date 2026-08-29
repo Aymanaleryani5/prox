@@ -2,7 +2,7 @@
   "version": 2,
   "rewrites": [
     {
-      "source": "/api/search",
+      "source": "search",
       "destination": "/api/search.js"
     },
     {
