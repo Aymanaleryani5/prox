@@ -1,8 +1,10 @@
 const NodeCache = require('node-cache');
 require('dotenv').config();
 
-// كاش الذاكرة للطلبات المتتالية داخل نفس الـ Instance
+// كاش محلي للطلبات القريبة جداً بنفس الـ Instance
 const cache = new NodeCache({ stdTTL: 172800 });
+
+const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "90ab24837fbb87a203ab5220f10c1338";
 
 const COUNTRY_CODES = [
   { code: '967', country: 'اليمن' }, { code: '966', country: 'السعودية' },
@@ -87,31 +89,37 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-// ⏱️ طلب مباشر سريع مع قطع الاتصال تلقائياً بعد الوقت المحدد
-async function fetchDirect(url, headers, timeoutMs = 4000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+    const response = await fetch(url, { ...options, signal: controller.signal });
     clearTimeout(id);
-    if (!res.ok) return null;
-    const text = await res.text();
-    let extracted;
-    try { extracted = extractNamesFromJSON(JSON.parse(text)); } 
-    catch { extracted = extractNamesFromResponse(text); }
-    return extracted.length > 0 ? extracted : null;
+    return response;
   } catch (error) {
     clearTimeout(id);
-    return null;
+    throw error;
   }
 }
 
+// دالة جلب البيانات معالجة
+async function processFetch(url, headers) {
+  const res = await fetchWithTimeout(url, { method: 'GET', headers }, 3000);
+  if (!res.ok) return null;
+  const text = await res.text();
+  let extracted;
+  try { extracted = extractNamesFromJSON(JSON.parse(text)); } 
+  catch { extracted = extractNamesFromResponse(text); }
+  return extracted.length > 0 ? extracted : null;
+}
+
+// Handler الرئيسي المتوافق مباشرة مع Vercel
 module.exports = async (req, res) => {
-  // ترويسات CORS المفتوحة لجميع البيئات
+  // إعدادات CORS وتخزين الـ Edge Caching المميز لـ Vercel
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // ⚡ تفعيل Edge Caching الخاص بـ Vercel: الاحتفاظ بالنتيجة وتوزيعها فورياً
+  // ⚡ تفعيل Edge Caching: الاحتفاظ بالنتيجة على شبكة Vercel العالمية لمدة شهر
   res.setHeader('Cache-Control', 's-maxage=2592000, stale-while-revalidate=86400');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -150,7 +158,6 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
-    // التحقق من وجود نتيجة سابقة في الكاش المحلي
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
@@ -168,8 +175,27 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    // 🚀 تنفيذ الطلب المباشر الفوري
-    const names = await fetchDirect(targetUrl, browserHeaders, 4500);
+    let names = [];
+    let source = '';
+
+    // 🚀 تنفيذ الطلب المباشر وطلب ScraperAPI بالتوازي مع إعطاء الأولوية للمباشر
+    const fastScrapingUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&ultra_fast=true&keep_headers=true`;
+
+    try {
+      // تجربة الاتصال المباشر
+      const directNames = await processFetch(targetUrl, browserHeaders);
+      if (directNames) {
+        names = directNames;
+        source = 'direct';
+      } else {
+        // في حال فشل المباشر فقط يتم استخدام ScraperAPI
+        const apiNames = await processFetch(fastScrapingUrl, browserHeaders);
+        if (apiNames) {
+          names = apiNames;
+          source = 'scrapingapi';
+        }
+      }
+    } catch (e) {}
 
     if (!names || names.length === 0) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
@@ -187,7 +213,7 @@ module.exports = async (req, res) => {
       success: true,
       results,
       total: results.length,
-      source: 'direct_vercel',
+      source,
       cached_at: new Date().toISOString()
     };
 
