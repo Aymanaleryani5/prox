@@ -2,9 +2,9 @@
   "name": "phone-lookup-api",
   "version": "1.0.0",
   "description": "Phone number lookup API with caching and rate limiting",
-  "main": "api/search.js",
+  "main": "search.js",
   "scripts": {
-    "start": "node api/search.js"
+    "start": "node search.js"
   },
   "dependencies": {
     "express": "^4.18.2",
