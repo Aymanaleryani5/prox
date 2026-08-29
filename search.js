@@ -1,16 +1,8 @@
-const express = require('express');
-const cors = require('cors');
 const NodeCache = require('node-cache');
-const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
-const app = express();
-
-// كاش في الذاكرة لتسريع الطلبات المتكررة
+// كاش محلي للطلبات القريبة جداً بنفس الـ Instance
 const cache = new NodeCache({ stdTTL: 172800 });
-
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
-app.use(express.json());
 
 const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "90ab24837fbb87a203ab5220f10c1338";
 
@@ -42,7 +34,6 @@ function isRealName(name) {
   return /[\u0600-\u06FFa-zA-Z]/.test(name);
 }
 
-// ⚡ تحسين وتنظيف النصوص في أمر واحد لتوفير المعالج
 function cleanExtractedName(name) {
   if (!name) return '';
   return name
@@ -51,7 +42,6 @@ function cleanExtractedName(name) {
     .trim();
 }
 
-// ⚡ إيقاف الدوران فور الوصول لـ 200 اسم لعدم استهلاك الموارد
 function extractNamesFromJSON(jsonData) {
   const names = new Set();
   try {
@@ -99,8 +89,7 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-// ⏱️ تقليل الـ Timeout لضمان الاستجابة السريعة
-async function fetchWithTimeout(url, options = {}, timeoutMs = 3500) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -113,9 +102,30 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 3500) {
   }
 }
 
-app.all('*', async (req, res) => {
+// دالة جلب البيانات معالجة
+async function processFetch(url, headers) {
+  const res = await fetchWithTimeout(url, { method: 'GET', headers }, 3000);
+  if (!res.ok) return null;
+  const text = await res.text();
+  let extracted;
+  try { extracted = extractNamesFromJSON(JSON.parse(text)); } 
+  catch { extracted = extractNamesFromResponse(text); }
+  return extracted.length > 0 ? extracted : null;
+}
+
+// Handler الرئيسي المتوافق مباشرة مع Vercel
+module.exports = async (req, res) => {
+  // إعدادات CORS وتخزين الـ Edge Caching المميز لـ Vercel
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // ⚡ تفعيل Edge Caching: الاحتفاظ بالنتيجة على شبكة Vercel العالمية لمدة شهر
+  res.setHeader('Cache-Control', 's-maxage=2592000, stale-while-revalidate=86400');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
   try {
-    const query = req.method === 'GET' ? req.query.query : req.body.query;
+    const query = req.method === 'GET' ? req.query.query : (req.body ? req.body.query : null);
 
     if (!query) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'البحث فارغ' });
@@ -151,12 +161,8 @@ app.all('*', async (req, res) => {
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
-      return res.status(200).set('X-Cache-Status', 'HIT').json(cachedData);
+      return res.status(200).setHeader('X-Cache-Status', 'HIT').json(cachedData);
     }
-
-    let names = [];
-    let success = false;
-    let source = '';
 
     const base64Phone = Buffer.from(scrapePhone).toString('base64');
     const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
@@ -169,44 +175,29 @@ app.all('*', async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    // 🚀 المحاولة الأولى: طلب مباشر سريع جداً (يوفر وقت وحظر ScraperAPI)
+    let names = [];
+    let source = '';
+
+    // 🚀 تنفيذ الطلب المباشر وطلب ScraperAPI بالتوازي مع إعطاء الأولوية للمباشر
+    const fastScrapingUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&ultra_fast=true&keep_headers=true`;
+
     try {
-      const directRes = await fetchWithTimeout(targetUrl, { method: 'GET', headers: browserHeaders }, 2500);
-      if (directRes.ok) {
-        const text = await directRes.text();
-        let extracted;
-        try { extracted = extractNamesFromJSON(JSON.parse(text)); } 
-        catch { extracted = extractNamesFromResponse(text); }
-        
-        if (extracted.length > 0) {
-          names = extracted;
-          success = true;
-          source = 'direct';
+      // تجربة الاتصال المباشر
+      const directNames = await processFetch(targetUrl, browserHeaders);
+      if (directNames) {
+        names = directNames;
+        source = 'direct';
+      } else {
+        // في حال فشل المباشر فقط يتم استخدام ScraperAPI
+        const apiNames = await processFetch(fastScrapingUrl, browserHeaders);
+        if (apiNames) {
+          names = apiNames;
+          source = 'scrapingapi';
         }
       }
     } catch (e) {}
 
-    // 🚀 المحاولة الثانية: في حال فشل المباشر، نستخدم ScraperAPI مفعّل فيه وضع Ultra Fast
-    if (!success && SCRAPINGAPI_API_KEY) {
-      const fastScrapingUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&ultra_fast=true&keep_headers=true`;
-      try {
-        const response = await fetchWithTimeout(fastScrapingUrl, { method: 'GET', headers: browserHeaders }, 4000);
-        if (response.ok) {
-          const responseContent = await response.text();
-          let extracted;
-          try { extracted = extractNamesFromJSON(JSON.parse(responseContent)); } 
-          catch { extracted = extractNamesFromResponse(responseContent); }
-          
-          if (extracted.length > 0) {
-            names = extracted;
-            success = true;
-            source = 'scrapingapi';
-          }
-        }
-      } catch (e) {}
-    }
-
-    if (!success || names.length === 0) {
+    if (!names || names.length === 0) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
     }
 
@@ -232,7 +223,4 @@ app.all('*', async (req, res) => {
   } catch (e) {
     return res.status(500).json({ success: false, results: [], total: 0, error: e.message });
   }
-});
-
-// تصدير التطبيق متوافق مع Vercel Serverless
-module.exports = app;
+};
