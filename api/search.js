@@ -1,10 +1,11 @@
-const NodeCache = require('node-cache');
-require('dotenv').config();
+// api/search.js
 
-// كاش محلي للطلبات القريبة جداً بنفس الـ Instance
-const cache = new NodeCache({ stdTTL: 172800 });
-
-const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "90ab24837fbb87a203ab5220f10c1338";
+const STOP_WORDS = new Set([
+  'صحيح', 'صحيحة', 'خطأ', 'نعم', 'لا', 'بحث', 'نتائج', 'البحث', 'للرقم',
+  'اسم', 'الشهرة', 'السجلات', 'المكتشفة', 'الأكثر', 'شيوعاً', 'شيوعا', 'اليمن',
+  'سجل', 'تفاصيل', 'بيانات', 'عفواً', 'تأكيد', 'الرقم', 'يرجى', 'الانتظار',
+  'null', 'undefined', 'info', 'country', 'search', 'phone', 'true', 'false'
+]);
 
 const COUNTRY_CODES = [
   { code: '967', country: 'اليمن' }, { code: '966', country: 'السعودية' },
@@ -19,13 +20,6 @@ const COUNTRY_CODES = [
   { code: '1', country: 'أمريكا / كندا' }, { code: '44', country: 'بريطانيا' },
   { code: '90', country: 'تركيا' }
 ];
-
-const STOP_WORDS = new Set([
-  'صحيح', 'صحيحة', 'خطأ', 'نعم', 'لا', 'بحث', 'نتائج', 'البحث', 'للرقم',
-  'اسم', 'الشهرة', 'السجلات', 'المكتشفة', 'الأكثر', 'شيوعاً', 'شيوعا', 'اليمن',
-  'سجل', 'تفاصيل', 'بيانات', 'عفواً', 'تأكيد', 'الرقم', 'يرجى', 'الانتظار',
-  'null', 'undefined', 'info', 'country', 'search', 'phone', 'true', 'false'
-]);
 
 function isRealName(name) {
   if (!name || name.length < 3) return false;
@@ -89,7 +83,7 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -98,28 +92,24 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
     return response;
   } catch (error) {
     clearTimeout(id);
-    throw error;
+    return null;
   }
 }
 
-// دالة جلب البيانات معالجة
 async function processFetch(url, headers) {
-  const res = await fetchWithTimeout(url, { method: 'GET', headers }, 3000);
-  if (!res.ok) return null;
+  const res = await fetchWithTimeout(url, { method: 'GET', headers }, 4000);
+  if (!res || !res.ok) return null;
   const text = await res.text();
-  let extracted;
+  let extracted = [];
   try { extracted = extractNamesFromJSON(JSON.parse(text)); } 
   catch { extracted = extractNamesFromResponse(text); }
   return extracted.length > 0 ? extracted : null;
 }
 
-// Handler الرئيسي المتوافق مباشرة مع Vercel
-module.exports = async (req, res) => {
-  // إعدادات CORS وتخزين الـ Edge Caching المميز لـ Vercel
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // ⚡ تفعيل Edge Caching: الاحتفاظ بالنتيجة على شبكة Vercel العالمية لمدة شهر
   res.setHeader('Cache-Control', 's-maxage=2592000, stale-while-revalidate=86400');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -158,12 +148,6 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
-    const cacheKey = `phone_${databasePhone}`;
-    const cachedData = cache.get(cacheKey);
-    if (cachedData) {
-      return res.status(200).setHeader('X-Cache-Status', 'HIT').json(cachedData);
-    }
-
     const base64Phone = Buffer.from(scrapePhone).toString('base64');
     const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
     const targetUrl = `https://ab.new9plus.com/wp-admin/admin-ajax.php?action=alosh_search&phone=${scrapePhone}&nocache=${Date.now()}`;
@@ -175,27 +159,16 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    let names = [];
-    let source = '';
+    const apiKey = process.env.SCRAPINGAPI_API_KEY || "90ab24837fbb87a203ab5220f10c1338";
+    const fastScrapingUrl = `https://api.scraperapi.com/?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&render=false&ultra_fast=true&keep_headers=true`;
 
-    // 🚀 تنفيذ الطلب المباشر وطلب ScraperAPI بالتوازي مع إعطاء الأولوية للمباشر
-    const fastScrapingUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&ultra_fast=true&keep_headers=true`;
+    let names = await processFetch(targetUrl, browserHeaders);
+    let source = 'direct';
 
-    try {
-      // تجربة الاتصال المباشر
-      const directNames = await processFetch(targetUrl, browserHeaders);
-      if (directNames) {
-        names = directNames;
-        source = 'direct';
-      } else {
-        // في حال فشل المباشر فقط يتم استخدام ScraperAPI
-        const apiNames = await processFetch(fastScrapingUrl, browserHeaders);
-        if (apiNames) {
-          names = apiNames;
-          source = 'scrapingapi';
-        }
-      }
-    } catch (e) {}
+    if (!names) {
+      names = await processFetch(fastScrapingUrl, browserHeaders);
+      source = 'scrapingapi';
+    }
 
     if (!names || names.length === 0) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
@@ -209,18 +182,14 @@ module.exports = async (req, res) => {
       formattedDate: new Date().toLocaleDateString('ar-EG')
     }));
 
-    const finalResponseData = {
+    return res.status(200).json({
       success: true,
       results,
       total: results.length,
-      source,
-      cached_at: new Date().toISOString()
-    };
-
-    cache.set(cacheKey, finalResponseData);
-    return res.status(200).json(finalResponseData);
+      source
+    });
 
   } catch (e) {
     return res.status(500).json({ success: false, results: [], total: 0, error: e.message });
   }
-}; 
+}
