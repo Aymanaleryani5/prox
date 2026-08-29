@@ -1,13 +1,19 @@
 {
   "version": 2,
-  "rewrites": [
+  "builds": [
     {
-      "source": "search",
-      "destination": "/api/search.js"
+      "src": "search.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/search",
+      "dest": "search.js"
     },
     {
-      "source": "/(.*)",
-      "destination": "/api/search.js"
+      "src": "/(.*)",
+      "dest": "search.js"
     }
   ]
 }
