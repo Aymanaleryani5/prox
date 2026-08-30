@@ -35,8 +35,10 @@ function isRealName(name) {
 function cleanExtractedName(name) {
   if (!name) return '';
   return name
+    .replace(/\\n|\n|\\r|\r/g, ' ') 
     .replace(/عدد\s*السجلات\s*المكتشفة|هذا\s*الاسم\s*هو\s*الأكثر\s*شيوعاً\s*لهذا\s*الرقم|نتائج\s*البحث\s*للرقم|[\\{}{}\[\]"':\-_,\/|\.]/gi, ' ')
     .replace(/\b(عدد|السجلات|المكتشفة|الأكثر|شيوعا|شيوعاً|لهذا|الرقم|يرجى|الانتظار|البحث|نتائج|اسم|الشهرة|هاتف|ثابت)\b/gi, '')
+    .replace(/\b[a-zA-Z]\b/g, '') 
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -81,11 +83,10 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-// دالة جلب مع مهلة 20 ثانية لضمان انتهاء الطلب بنجاح
 async function fetchWithRetry(url, headers, maxRetries = 2) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 20000); // 20 ثانية كحد أقصى
+    const id = setTimeout(() => controller.abort(), 20000);
 
     try {
       const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
@@ -143,7 +144,6 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
-    // 1. التثبت من الكاش أولاً
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
@@ -161,13 +161,10 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    // رابط ScraperAPI محسّن للطلب العالي والأكيد
     const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&keep_headers=true`;
 
-    // 2. المحاولة المباشرة أولاً بسرعة
     let names = await fetchWithRetry(targetUrl, browserHeaders, 1);
 
-    // 3. إذا لم تجلب المحاولة المباشرة نتائج، يتم الانتقال تلقائياً لـ ScraperAPI مع إعادة المحاولة
     if (!names || names.length === 0) {
       names = await fetchWithRetry(scrapingApiUrl, browserHeaders, 2);
     }
