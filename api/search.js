@@ -1,8 +1,10 @@
 const NodeCache = require('node-cache');
 
-// كاش يدوم لمدة 48 ساعة للسرعة اللحظية في حال تكرار الرقم
+// كاش يدوم لمدة 48 ساعة للسرعة وتوفير رصيد الـ API
 const cache = new NodeCache({ stdTTL: 172800, checkperiod: 600 });
-const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
+
+// مفتاح ScrapingBee الذي قمت بتزويدي به
+const SCRAPINGBEE_API_KEY = "VE09LYYXN90PY3FRV8O6FDU1U2WWAUX6K4KUMIGPFOMXV1GFS8ZD0UXAGPN52SCRQI0OU5I7BAEXHTVH";
 
 const COUNTRY_CODES = [
   { code: '967', country: 'اليمن' }, { code: '966', country: 'السعودية' },
@@ -22,6 +24,7 @@ const STOP_WORDS = new Set([
   'صحيح', 'صحيحة', 'خطأ', 'نعم', 'لا', 'بحث', 'نتائج', 'البحث', 'للرقم',
   'اسم', 'الشهرة', 'السجلات', 'المكتشفة', 'الأكثر', 'شيوعاً', 'شيوعا', 'اليمن',
   'سجل', 'تفاصيل', 'بيانات', 'عفواً', 'تأكيد', 'الرقم', 'يرجى', 'الانتظار',
+  'استنفدت', 'رصيد', 'المجاني', 'الرصيد', 'تجدد',
   'null', 'undefined', 'info', 'country', 'search', 'phone', 'true', 'false'
 ]);
 
@@ -35,8 +38,10 @@ function isRealName(name) {
 function cleanExtractedName(name) {
   if (!name) return '';
   return name
+    .replace(/\\n|\n|\\r|\r/g, ' ') 
     .replace(/عدد\s*السجلات\s*المكتشفة|هذا\s*الاسم\s*هو\s*الأكثر\s*شيوعاً\s*لهذا\s*الرقم|نتائج\s*البحث\s*للرقم|[\\{}{}\[\]"':\-_,\/|\.]/gi, ' ')
-    .replace(/\b(عدد|السجلات|المكتشفة|الأكثر|شيوعا|شيوعاً|لهذا|الرقم|يرجى|الانتظار|البحث|نتائج|اسم|الشهرة|هاتف|ثابت)\b/gi, '')
+    .replace(/\b(عدد|السجلات|المكتشفة|الأكثر|شيوعا|شيوعاً|لهذا|الرقم|يرجى|الانتظار|البحث|نتائج|اسم|الشهرة|هاتف|ثابت|استنفدت|رصيد|المجاني)\b/gi, '')
+    .replace(/\b[a-zA-Z]\b/g, '') 
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -44,6 +49,10 @@ function cleanExtractedName(name) {
 function parseNames(content) {
   const names = new Set();
   if (!content) return [];
+
+  if (content.includes('استنفدت رصيد البحث') || content.includes('يرجى الانتظار')) {
+    return [];
+  }
 
   let parsed = null;
   try { parsed = JSON.parse(content); } catch (e) {}
@@ -81,14 +90,15 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-// دالة جلب مع مهلة 20 ثانية لضمان انتهاء الطلب بنجاح
-async function fetchWithRetry(url, headers, maxRetries = 2) {
+async function fetchWithScrapingBee(url, apiKey, maxRetries = 2) {
+  const scrapingBeeUrl = `https://app.scrapingbee.com/api/v1/?api_key=${apiKey}&url=${encodeURIComponent(url)}&render_js=false`;
+  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 20000); // 20 ثانية كحد أقصى
+    const id = setTimeout(() => controller.abort(), 20000);
 
     try {
-      const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+      const res = await fetch(scrapingBeeUrl, { method: 'GET', signal: controller.signal });
       clearTimeout(id);
       if (res.ok) {
         const txt = await res.text();
@@ -143,7 +153,6 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
-    // 1. التثبت من الكاش أولاً
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
@@ -154,26 +163,11 @@ module.exports = async (req, res) => {
     const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
     const targetUrl = `https://ab.new9plus.com/wp-admin/admin-ajax.php?action=alosh_search&phone=${scrapePhone}&nocache=${Date.now()}`;
 
-    const browserHeaders = {
-      'accept': '*/*',
-      'accept-language': 'ar,en;q=0.9',
-      'referer': dynamicReferer,
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-    };
-
-    // رابط ScraperAPI محسّن للطلب العالي والأكيد
-    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&keep_headers=true`;
-
-    // 2. المحاولة المباشرة أولاً بسرعة
-    let names = await fetchWithRetry(targetUrl, browserHeaders, 1);
-
-    // 3. إذا لم تجلب المحاولة المباشرة نتائج، يتم الانتقال تلقائياً لـ ScraperAPI مع إعادة المحاولة
-    if (!names || names.length === 0) {
-      names = await fetchWithRetry(scrapingApiUrl, browserHeaders, 2);
-    }
+    // جلب البيانات عبر ScrapingBee لتجاوز حظر الحماية
+    let names = await fetchWithScrapingBee(targetUrl, SCRAPINGBEE_API_KEY, 2);
 
     if (!names || names.length === 0) {
-      return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
+      return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج أو نفد رصيد خدمة التخطي' });
     }
 
     const results = names.map(name => ({
@@ -188,7 +182,7 @@ module.exports = async (req, res) => {
       success: true,
       results,
       total: results.length,
-      source: 'scrapingapi',
+      source: 'scrapingbee',
       cached_at: new Date().toISOString()
     };
 
