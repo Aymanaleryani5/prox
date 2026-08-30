@@ -1,6 +1,6 @@
 const NodeCache = require('node-cache');
 
-// كاش يدوم لمدة 48 ساعة لضمان السرعة اللحظية في التكرار
+// كاش يدوم لمدة 48 ساعة للسرعة اللحظية في حال تكرار الرقم
 const cache = new NodeCache({ stdTTL: 172800, checkperiod: 600 });
 const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
 
@@ -81,22 +81,25 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-// دالة جلب سريعة مع مهلة زملية صريحة بالملي ثانية
-async function fetchSingle(url, headers, timeoutMs) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
-    clearTimeout(id);
-    if (!res.ok) throw new Error('Status Error');
-    const txt = await res.text();
-    const names = parseNames(txt);
-    if (names.length > 0) return names;
-    throw new Error('No names found');
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
+// دالة جلب مع مهلة 20 ثانية لضمان انتهاء الطلب بنجاح
+async function fetchWithRetry(url, headers, maxRetries = 2) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 20000); // 20 ثانية كحد أقصى
+
+    try {
+      const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+      clearTimeout(id);
+      if (res.ok) {
+        const txt = await res.text();
+        const names = parseNames(txt);
+        if (names.length > 0) return names;
+      }
+    } catch (err) {
+      clearTimeout(id);
+    }
   }
+  return [];
 }
 
 module.exports = async (req, res) => {
@@ -140,11 +143,11 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
-    // 1. فحص الكاش الفوري (استجابة خلال 0.01 ثانية)
+    // 1. التثبت من الكاش أولاً
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
-      return res.status(200).json({ ...cachedData, speed: 'ULTRA_FAST_CACHE' });
+      return res.status(200).json(cachedData);
     }
 
     const base64Phone = Buffer.from(scrapePhone).toString('base64');
@@ -158,17 +161,15 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
+    // رابط ScraperAPI محسّن للطلب العالي والأكيد
+    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&keep_headers=true`;
 
-    // 2. السباق المتوازي (Race Mode): أول مصدر يستجيب يُلغي بقية الطلبات فوراً
-    let names = [];
-    try {
-      names = await Promise.any([
-        fetchSingle(targetUrl, browserHeaders, 2500),         // طلب مباشر خارق (2.5 ثانية)
-        fetchSingle(scrapingApiUrl, browserHeaders, 7000)     // طلب ScraperAPI (7 ثوانٍ)
-      ]);
-    } catch (e) {
-      names = [];
+    // 2. المحاولة المباشرة أولاً بسرعة
+    let names = await fetchWithRetry(targetUrl, browserHeaders, 1);
+
+    // 3. إذا لم تجلب المحاولة المباشرة نتائج، يتم الانتقال تلقائياً لـ ScraperAPI مع إعادة المحاولة
+    if (!names || names.length === 0) {
+      names = await fetchWithRetry(scrapingApiUrl, browserHeaders, 2);
     }
 
     if (!names || names.length === 0) {
@@ -191,7 +192,6 @@ module.exports = async (req, res) => {
       cached_at: new Date().toISOString()
     };
 
-    // حفظ البيانات في الكاش للطلبات القادمة
     cache.set(cacheKey, finalResponseData);
     return res.status(200).json(finalResponseData);
 
