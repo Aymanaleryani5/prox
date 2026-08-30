@@ -9,7 +9,7 @@ const COUNTRY_CODES = [
   { code: '20', country: 'مصر' }, { code: '971', country: 'الإمارات' },
   { code: '965', country: 'الكويت' }, { code: '968', country: 'عُمان' },
   { code: '974', country: 'قطر' }, { code: '973', country: 'البحرين' },
-  { code: '962', country: 'الأردن' }, { code: '961', country: 'لبنان' },
+  { code: '962', country: 'الأردن' }, { code: '961', country: 'لبنان' }, 
   { code: '963', country: 'سوريا' }, { code: '964', country: 'العراق' },
   { code: '970', country: 'فلسطين' }, { code: '212', country: 'المغرب' },
   { code: '213', country: 'الجزائر' }, { code: '216', country: 'تونس' },
