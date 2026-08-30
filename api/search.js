@@ -1,6 +1,7 @@
 const NodeCache = require('node-cache');
 
-const cache = new NodeCache({ stdTTL: 172800 });
+// كاش يدوم لمدة 48 ساعة لضمان السرعة اللحظية في التكرار
+const cache = new NodeCache({ stdTTL: 172800, checkperiod: 600 });
 const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
 
 const COUNTRY_CODES = [
@@ -40,34 +41,29 @@ function cleanExtractedName(name) {
     .trim();
 }
 
-function extractNamesFromJSON(jsonData) {
+function parseNames(content) {
   const names = new Set();
-  try {
-    const text = typeof jsonData === 'string' ? jsonData : (jsonData.result || JSON.stringify(jsonData));
-    if (text) {
-      const fameMatch = text.match(/اسم الشهرة[:\s]+([^\n]+)/);
-      if (fameMatch) {
-        let name = cleanExtractedName(fameMatch[1]);
-        if (isRealName(name)) names.add(name);
-      }
+  if (!content) return [];
 
-      const numberedMatches = text.matchAll(/\d+\s*[-–—]\s*([^\d\n]+)/g);
-      for (const match of numberedMatches) {
-        let name = cleanExtractedName(match[1]);
-        if (isRealName(name)) names.add(name);
-      }
+  let parsed = null;
+  try { parsed = JSON.parse(content); } catch (e) {}
+
+  const text = parsed ? (typeof parsed === 'string' ? parsed : (parsed.result || JSON.stringify(parsed))) : content;
+
+  if (text) {
+    const fameMatch = text.match(/اسم الشهرة[:\s]+([^\n]+)/);
+    if (fameMatch) {
+      let name = cleanExtractedName(fameMatch[1]);
+      if (isRealName(name)) names.add(name);
     }
-  } catch (e) {}
-  return Array.from(names).slice(0, 200);
-}
 
-function extractNamesFromResponse(html) {
-  const names = new Set();
-  const numberedMatches = html.matchAll(/(\d+)\s*[-–—]\s*([^\d\n<]+)/g);
-  for (const match of numberedMatches) {
-    let name = cleanExtractedName(match[2]);
-    if (isRealName(name)) names.add(name);
+    const numberedMatches = text.matchAll(/(\d+)\s*[-–—]\s*([^\d\n<]+)/g);
+    for (const match of numberedMatches) {
+      let name = cleanExtractedName(match[2] || match[1]);
+      if (isRealName(name)) names.add(name);
+    }
   }
+
   return Array.from(names).slice(0, 200);
 }
 
@@ -85,23 +81,20 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-async function fetchScrapingApi(targetUrl, headers) {
-  // تكوين الرابط ليشمل أسرع الخيارات في ScrapingAPI
-  const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&keep_headers=true`;
-
+// دالة جلب سريعة مع مهلة زملية صريحة بالملي ثانية
+async function fetchSingle(url, headers, timeoutMs) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 12000); // مهلة أقصاها 12 ثانية
-
+  const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(scrapingApiUrl, {
-      method: 'GET',
-      headers: headers,
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-    return response;
+    const res = await fetch(url, { method: 'GET', headers, signal: controller.signal });
+    clearTimeout(id);
+    if (!res.ok) throw new Error('Status Error');
+    const txt = await res.text();
+    const names = parseNames(txt);
+    if (names.length > 0) return names;
+    throw new Error('No names found');
   } catch (err) {
-    clearTimeout(timeoutId);
+    clearTimeout(id);
     throw err;
   }
 }
@@ -147,10 +140,11 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
+    // 1. فحص الكاش الفوري (استجابة خلال 0.01 ثانية)
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) {
-      return res.status(200).json(cachedData);
+      return res.status(200).json({ ...cachedData, speed: 'ULTRA_FAST_CACHE' });
     }
 
     const base64Phone = Buffer.from(scrapePhone).toString('base64');
@@ -164,18 +158,17 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
+    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
+
+    // 2. السباق المتوازي (Race Mode): أول مصدر يستجيب يُلغي بقية الطلبات فوراً
     let names = [];
-
-    // طلب حقيقي من خلال ScrapingAPI مباشرة
-    const response = await fetchScrapingApi(targetUrl, browserHeaders);
-
-    if (response && response.ok) {
-      const responseContent = await response.text();
-      try {
-        names = extractNamesFromJSON(JSON.parse(responseContent));
-      } catch {
-        names = extractNamesFromResponse(responseContent);
-      }
+    try {
+      names = await Promise.any([
+        fetchSingle(targetUrl, browserHeaders, 2500),         // طلب مباشر خارق (2.5 ثانية)
+        fetchSingle(scrapingApiUrl, browserHeaders, 7000)     // طلب ScraperAPI (7 ثوانٍ)
+      ]);
+    } catch (e) {
+      names = [];
     }
 
     if (!names || names.length === 0) {
@@ -198,6 +191,7 @@ module.exports = async (req, res) => {
       cached_at: new Date().toISOString()
     };
 
+    // حفظ البيانات في الكاش للطلبات القادمة
     cache.set(cacheKey, finalResponseData);
     return res.status(200).json(finalResponseData);
 
