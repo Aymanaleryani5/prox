@@ -85,6 +85,27 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
+async function fetchScrapingApi(targetUrl, headers) {
+  // تكوين الرابط ليشمل أسرع الخيارات في ScrapingAPI
+  const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&keep_headers=true`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000); // مهلة أقصاها 12 ثانية
+
+  try {
+    const response = await fetch(scrapingApiUrl, {
+      method: 'GET',
+      headers: headers,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+}
+
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -143,12 +164,12 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
-
-    const response = await fetch(scrapingApiUrl, { method: 'GET', headers: browserHeaders });
     let names = [];
 
-    if (response.ok) {
+    // طلب حقيقي من خلال ScrapingAPI مباشرة
+    const response = await fetchScrapingApi(targetUrl, browserHeaders);
+
+    if (response && response.ok) {
       const responseContent = await response.text();
       try {
         names = extractNamesFromJSON(JSON.parse(responseContent));
