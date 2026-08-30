@@ -35,11 +35,10 @@ function isRealName(name) {
 function cleanExtractedName(name) {
   if (!name) return '';
   return name
-    .replace(/\\n|\\r|\n|\r/g, ' ') // إزالة الرموز والأسطر الجديدة المسربة المسببة لظهور حرف n
+    .replace(/\\n|\n|\\r|\r/g, ' ') // إزالة أعطال السطر الجديد والترميزات النصية
     .replace(/عدد\s*السجلات\s*المكتشفة|هذا\s*الاسم\s*هو\s*الأكثر\s*شيوعاً\s*لهذا\s*الرقم|نتائج\s*البحث\s*للرقم|[\\{}{}\[\]"':\-_,\/|\.]/gi, ' ')
     .replace(/\b(عدد|السجلات|المكتشفة|الأكثر|شيوعا|شيوعاً|لهذا|الرقم|يرجى|الانتظار|البحث|نتائج|اسم|الشهرة|هاتف|ثابت)\b/gi, '')
-    .replace(/(?<=\s|^|\b)n(?=[\u0600-\u06FF])/g, '') // حذف حرف n إذا كان ملتصقاً مباشرة بكلمة عربية
-    .replace(/([\u0600-\u06FF])n(?=\s|$|\b)/g, '$1') // حذف حرف n إذا كان في نهاية كلمة عربية
+    .replace(/\b[a-zA-Z]\b/g, '') // إزالة أي حرف إنجليزي منفرد يظهر بداخل أو أطراف النص مثل n
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -51,19 +50,16 @@ function parseNames(content) {
   let parsed = null;
   try { parsed = JSON.parse(content); } catch (e) {}
 
-  let text = parsed ? (typeof parsed === 'string' ? parsed : (parsed.result || JSON.stringify(parsed))) : content;
+  const text = parsed ? (typeof parsed === 'string' ? parsed : (parsed.result || JSON.stringify(parsed))) : content;
 
   if (text) {
-    // تنظيف السلسلة النصية المبدئية من ترميزات الأسطر
-    text = text.replace(/\\n/g, '\n').replace(/\\r/g, '\r');
-
-    const fameMatch = text.match(/اسم الشهرة[:\s]+([^\n\r]+)/);
+    const fameMatch = text.match(/اسم الشهرة[:\s]+([^\n]+)/);
     if (fameMatch) {
       let name = cleanExtractedName(fameMatch[1]);
       if (isRealName(name)) names.add(name);
     }
 
-    const numberedMatches = text.matchAll(/(\d+)\s*[-–—]\s*([^\d\n\r<]+)/g);
+    const numberedMatches = text.matchAll(/(\d+)\s*[-–—]\s*([^\d\n<]+)/g);
     for (const match of numberedMatches) {
       let name = cleanExtractedName(match[2] || match[1]);
       if (isRealName(name)) names.add(name);
