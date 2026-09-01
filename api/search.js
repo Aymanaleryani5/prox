@@ -1,46 +1,24 @@
+
+
 const NodeCache = require('node-cache');
+require('dotenv').config();
 
-// ==========================================================
-// 📊 نظام الكاش (Memory Cache) - مدة الكاش 2 يوم (48 ساعة)
-// ==========================================================
-class MemoryCache {
-  constructor() {
-    this.cache = new NodeCache({ stdTTL: 172800, checkperiod: 172800 });
-  }
+// كاش محلي للطلبات القريبة جداً بنفس الـ Instance
+const cache = new NodeCache({ stdTTL: 172800 });
 
-  match(requestKey) {
-    return this.cache.get(requestKey) || null;
-  }
+const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "90ab24837fbb87a203ab5220f10c1338";
 
-  put(requestKey, responseData) {
-    this.cache.set(requestKey, responseData);
-  }
-}
-
-// ==========================================================
-// 🌍 خريطة مفاتيح دول العالم
-// ==========================================================
 const COUNTRY_CODES = [
-  { code: '967', country: 'اليمن' },
-  { code: '966', country: 'السعودية' },
-  { code: '20', country: 'مصر' },
-  { code: '971', country: 'الإمارات' },
-  { code: '965', country: 'الكويت' },
-  { code: '968', country: 'عُمان' },
-  { code: '974', country: 'قطر' },
-  { code: '973', country: 'البحرين' },
-  { code: '962', country: 'الأردن' },
-  { code: '961', country: 'لبنان' },
-  { code: '963', country: 'سوريا' },
-  { code: '964', country: 'العراق' },
-  { code: '970', country: 'فلسطين' },
-  { code: '212', country: 'المغرب' },
-  { code: '213', country: 'الجزائر' },
-  { code: '216', country: 'تونس' },
-  { code: '218', country: 'ليبيا' },
-  { code: '249', country: 'السودان' },
-  { code: '1', country: 'أمريكا / كندا' },
-  { code: '44', country: 'بريطانيا' },
+  { code: '967', country: 'اليمن' }, { code: '966', country: 'السعودية' },
+  { code: '20', country: 'مصر' }, { code: '971', country: 'الإمارات' },
+  { code: '965', country: 'الكويت' }, { code: '968', country: 'عُمان' },
+  { code: '974', country: 'قطر' }, { code: '973', country: 'البحرين' },
+  { code: '962', country: 'الأردن' }, { code: '961', country: 'لبنان' },
+  { code: '963', country: 'سوريا' }, { code: '964', country: 'العراق' },
+  { code: '970', country: 'فلسطين' }, { code: '212', country: 'المغرب' },
+  { code: '213', country: 'الجزائر' }, { code: '216', country: 'تونس' },
+  { code: '218', country: 'ليبيا' }, { code: '249', country: 'السودان' },
+  { code: '1', country: 'أمريكا / كندا' }, { code: '44', country: 'بريطانيا' },
   { code: '90', country: 'تركيا' }
 ];
 
@@ -61,8 +39,7 @@ function isRealName(name) {
 function cleanExtractedName(name) {
   if (!name) return '';
   return name
-    .replace(/عدد\s*السجلات\s*المكتشفة|هذا\s*الاسم\s*هو\s*الأكثر\s*شيوعاً\s*لهذا\s*الرقم|نتائج\s*البحث\s*للرقم|[\\{}{}\[\]"':\-_,\/|\.]/gi, ' ')
-    .replace(/\b(عدد|السجلات|المكتشفة|الأكثر|شيوعا|شيوعاً|لهذا|الرقم|يرجى|الانتظار|البحث|نتائج|اسم|الشهرة|هاتف|ثابت)\b/gi, '')
+    .replace(/(عدد\s*السجلات\s*المكتشفة|هذا\s*الاسم\s*هو\s*الأكثر\s*شيوعاً\s*لهذا\s*الرقم|نتائج\s*البحث\s*للرقم|\b(عدد|السجلات|المكتشفة|الأكثر|شيوعا|شيوعاً|لهذا|الرقم|يرجى|الانتظار|البحث|نتائج|اسم|الشهرة|هاتف|ثابت)\b|[\\{}()\[\]"':\-_,\/|\.])/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -80,22 +57,24 @@ function extractNamesFromJSON(jsonData) {
 
       const numberedMatches = text.matchAll(/\d+\s*[-–—]\s*([^\d\n]+)/g);
       for (const match of numberedMatches) {
+        if (names.size >= 200) break;
         let name = cleanExtractedName(match[1]);
         if (isRealName(name)) names.add(name);
       }
     }
   } catch (e) {}
-  return Array.from(names).slice(0, 200);
+  return Array.from(names);
 }
 
 function extractNamesFromResponse(html) {
   const names = new Set();
   const numberedMatches = html.matchAll(/(\d+)\s*[-–—]\s*([^\d\n<]+)/g);
   for (const match of numberedMatches) {
+    if (names.size >= 200) break;
     let name = cleanExtractedName(match[2]);
     if (isRealName(name)) names.add(name);
   }
-  return Array.from(names).slice(0, 200);
+  return Array.from(names);
 }
 
 function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
@@ -106,18 +85,13 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
     if (/^(70)[0-9]{7}$/.test(cleanPhoneYemen)) return 'واي';
     return 'اليمن';
   }
-
   for (const item of COUNTRY_CODES) {
-    if (fullPhone.startsWith(item.code)) {
-      return item.country;
-    }
+    if (fullPhone.startsWith(item.code)) return item.country;
   }
-
   return 'رقم دولي';
 }
 
-// ⏱️ الـ Timeout الافتراضي 7 ثوانٍ (7000ms)
-async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 3000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -130,60 +104,37 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
   }
 }
 
-// إنشاء نسخة الكاش (تُستخدم لكل الطلبات)
-const cache = new MemoryCache();
-const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
+// دالة جلب البيانات معالجة
+async function processFetch(url, headers) {
+  const res = await fetchWithTimeout(url, { method: 'GET', headers }, 3000);
+  if (!res.ok) return null;
+  const text = await res.text();
+  let extracted;
+  try { extracted = extractNamesFromJSON(JSON.parse(text)); } 
+  catch { extracted = extractNamesFromResponse(text); }
+  return extracted.length > 0 ? extracted : null;
+}
 
-// ==========================================================
-// 🚀 Handler الرئيسي لـ Vercel
-// ==========================================================
+// Handler الرئيسي المتوافق مباشرة مع Vercel
 module.exports = async (req, res) => {
-  // إعداد CORS
+  // إعدادات CORS وتخزين الـ Edge Caching المميز لـ Vercel
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // ⚡ تفعيل Edge Caching: الاحتفاظ بالنتيجة على شبكة Vercel العالمية لمدة شهر
+  res.setHeader('Cache-Control', 's-maxage=2592000, stale-while-revalidate=86400');
 
-  // معالجة طلبات OPTIONS (preflight)
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  // إعداد Rate Limiting بسيط (3 ثواني بين الطلبات)
-  // Vercel لا يدوم معها Rate Limiting بالكاش، لكن نستخدمه هنا
-  const ip = req.headers['cf-connecting-ip'] || 
-             req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
-             req.socket?.remoteAddress || 
-             'anonymous';
-  
-  const rateLimitKey = `ratelimit_${ip}`;
-  const lastRequest = cache.match(rateLimitKey);
-  
-  if (lastRequest) {
-    const timeDiff = Date.now() - lastRequest;
-    if (timeDiff < 3000) {
-      return res.status(429).json({
-        success: false,
-        results: [],
-        total: 0,
-        error: 'مهلاً! الرجاء الانتظار',
-        message: '⏳ يرجى الانتظار 3 ثواني بين عمليات البحث'
-      });
-    }
-  }
-  cache.put(rateLimitKey, Date.now());
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    const query = req.method === 'GET' ? req.query.query : req.body?.query;
+    const query = req.method === 'GET' ? req.query.query : (req.body ? req.body.query : null);
 
     if (!query) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'البحث فارغ' });
     }
 
     let rawDigits = String(query).replace(/\D/g, '');
-
-    if (rawDigits.startsWith('00')) {
-      rawDigits = rawDigits.substring(2);
-    }
+    if (rawDigits.startsWith('00')) rawDigits = rawDigits.substring(2);
 
     let provider = '';
     let databasePhone = '';
@@ -210,16 +161,10 @@ module.exports = async (req, res) => {
     }
 
     const cacheKey = `phone_${databasePhone}`;
-    const cachedData = cache.match(cacheKey);
-
+    const cachedData = cache.get(cacheKey);
     if (cachedData) {
-      res.setHeader('X-Cache-Status', 'HIT');
-      return res.status(200).json(cachedData);
+      return res.status(200).setHeader('X-Cache-Status', 'HIT').json(cachedData);
     }
-
-    let names = [];
-    let success = false;
-    let source = '';
 
     const base64Phone = Buffer.from(scrapePhone).toString('base64');
     const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
@@ -232,38 +177,36 @@ module.exports = async (req, res) => {
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     };
 
-    if (!SCRAPINGAPI_API_KEY) {
-      return res.status(200).json({ success: false, results: [], total: 0, error: 'مفتاح ScraperAPI غير مضبوط' });
-    }
+    let names = [];
+    let source = '';
 
-    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
+    // 🚀 تنفيذ الطلب المباشر وطلب ScraperAPI بالتوازي مع إعطاء الأولوية للمباشر
+    const fastScrapingUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false&ultra_fast=true&keep_headers=true`;
 
     try {
-      const response = await fetchWithTimeout(scrapingApiUrl, { method: 'GET', headers: browserHeaders }, 7000);
-      if (response.ok) {
-        const responseContent = await response.text();
-        let extracted;
-        try {
-          extracted = extractNamesFromJSON(JSON.parse(responseContent));
-        } catch {
-          extracted = extractNamesFromResponse(responseContent);
-        }
-        if (extracted.length > 0) {
-          names = extracted;
-          success = true;
+      // تجربة الاتصال المباشر
+      const directNames = await processFetch(targetUrl, browserHeaders);
+      if (directNames) {
+        names = directNames;
+        source = 'direct';
+      } else {
+        // في حال فشل المباشر فقط يتم استخدام ScraperAPI
+        const apiNames = await processFetch(fastScrapingUrl, browserHeaders);
+        if (apiNames) {
+          names = apiNames;
           source = 'scrapingapi';
         }
       }
     } catch (e) {}
 
-    if (!success || names.length === 0) {
+    if (!names || names.length === 0) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
     }
 
     const results = names.map(name => ({
       name,
       phone: databasePhone,
-      source: 'ScrapingAPI',
+      source: 'Database',
       provider,
       formattedDate: new Date().toLocaleDateString('ar-EG')
     }));
@@ -276,7 +219,7 @@ module.exports = async (req, res) => {
       cached_at: new Date().toISOString()
     };
 
-    cache.put(cacheKey, finalResponseData);
+    cache.set(cacheKey, finalResponseData);
     return res.status(200).json(finalResponseData);
 
   } catch (e) {
