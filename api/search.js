@@ -1,13 +1,25 @@
-const express = require('express');
-const cors = require('cors');
+const NodeCache = require('node-cache');
 
-const app = express();
+// ==========================================================
+// 📊 نظام الكاش (Memory Cache) - مدة الكاش 2 يوم (48 ساعة)
+// ==========================================================
+class MemoryCache {
+  constructor() {
+    this.cache = new NodeCache({ stdTTL: 172800, checkperiod: 172800 });
+  }
 
-const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
+  match(requestKey) {
+    return this.cache.get(requestKey) || null;
+  }
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
-app.use(express.json());
+  put(requestKey, responseData) {
+    this.cache.set(requestKey, responseData);
+  }
+}
 
+// ==========================================================
+// 🌍 خريطة مفاتيح دول العالم
+// ==========================================================
 const COUNTRY_CODES = [
   { code: '967', country: 'اليمن' },
   { code: '966', country: 'السعودية' },
@@ -104,6 +116,7 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
+// ⏱️ الـ Timeout الافتراضي 7 ثوانٍ (7000ms)
 async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -117,7 +130,48 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
   }
 }
 
-app.all('*', async (req, res) => {
+// إنشاء نسخة الكاش (تُستخدم لكل الطلبات)
+const cache = new MemoryCache();
+const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
+
+// ==========================================================
+// 🚀 Handler الرئيسي لـ Vercel
+// ==========================================================
+module.exports = async (req, res) => {
+  // إعداد CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  // معالجة طلبات OPTIONS (preflight)
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // إعداد Rate Limiting بسيط (3 ثواني بين الطلبات)
+  // Vercel لا يدوم معها Rate Limiting بالكاش، لكن نستخدمه هنا
+  const ip = req.headers['cf-connecting-ip'] || 
+             req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+             req.socket?.remoteAddress || 
+             'anonymous';
+  
+  const rateLimitKey = `ratelimit_${ip}`;
+  const lastRequest = cache.match(rateLimitKey);
+  
+  if (lastRequest) {
+    const timeDiff = Date.now() - lastRequest;
+    if (timeDiff < 3000) {
+      return res.status(429).json({
+        success: false,
+        results: [],
+        total: 0,
+        error: 'مهلاً! الرجاء الانتظار',
+        message: '⏳ يرجى الانتظار 3 ثواني بين عمليات البحث'
+      });
+    }
+  }
+  cache.put(rateLimitKey, Date.now());
+
   try {
     const query = req.method === 'GET' ? req.query.query : req.body?.query;
 
@@ -153,6 +207,14 @@ app.all('*', async (req, res) => {
       provider = detectProviderAndCountry(rawDigits, null);
       databasePhone = '+' + rawDigits;
       scrapePhone = rawDigits;
+    }
+
+    const cacheKey = `phone_${databasePhone}`;
+    const cachedData = cache.match(cacheKey);
+
+    if (cachedData) {
+      res.setHeader('X-Cache-Status', 'HIT');
+      return res.status(200).json(cachedData);
     }
 
     let names = [];
@@ -206,20 +268,18 @@ app.all('*', async (req, res) => {
       formattedDate: new Date().toLocaleDateString('ar-EG')
     }));
 
-    // Cache-Control لتفعيل الكاش الذكي على Vercel Edge Network بدلاً من NodeCache
-    res.setHeader('Cache-Control', 's-maxage=172800, stale-while-revalidate');
-
-    return res.status(200).json({
+    const finalResponseData = {
       success: true,
       results,
       total: results.length,
       source,
       cached_at: new Date().toISOString()
-    });
+    };
+
+    cache.put(cacheKey, finalResponseData);
+    return res.status(200).json(finalResponseData);
 
   } catch (e) {
     return res.status(500).json({ success: false, results: [], total: 0, error: e.message });
   }
-});
-
-module.exports = app;
+};
