@@ -1,14 +1,7 @@
-const express = require('express');
-const cors = require('cors');
 const NodeCache = require('node-cache');
-const rateLimit = require('express-rate-limit');
-require('dotenv').config();
-
-const app = express();
-const PORT = process.env.PORT || 3000;
 
 // ==========================================================
-// 📊 نظام الكاش (Memory Cache) - مدة الكاش والفحص 2 يوم (48 ساعة)
+// 📊 نظام الكاش (Memory Cache)
 // ==========================================================
 class MemoryCache {
   constructor() {
@@ -23,39 +16,6 @@ class MemoryCache {
     this.cache.set(requestKey, responseData);
   }
 }
-
-// ==========================================================
-// 📊 نظام تحديد المعدل (Rate Limiting)
-// ==========================================================
-const rateLimiter = rateLimit({
-  windowMs: 3 * 1000,
-  max: 1,
-  message: JSON.stringify({
-    success: false,
-    results: [],
-    total: 0,
-    error: 'مهلاً! الرجاء الانتظار',
-    message: '⏳ يرجى الانتظار 3 ثواني بين عمليات البحث'
-  }),
-  keyGenerator: (req) => {
-    return req.headers['cf-connecting-ip'] ||
-           req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-           req.ip ||
-           'anonymous';
-  },
-  handler: (req, res) => {
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.status(429).send(rateLimiter.message);
-  }
-});
-
-const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
-const cache = new MemoryCache();
-
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type'] }));
-app.use(express.json());
-
-app.get('/ping', (req, res) => res.status(200).send('OK'));
 
 // ==========================================================
 // 🌍 خريطة مفاتيح دول العالم
@@ -156,8 +116,7 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-// ⏱️ الـ Timeout الافتراضي 7 ثوانٍ (7000ms)
-async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -171,11 +130,115 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
 }
 
 // ==========================================================
-// 🚀 Endpoint الرئيسي
+// 🔧 محاولة البدائل المتعددة
 // ==========================================================
-app.all('/api/search', rateLimiter, async (req, res) => {
+async function searchWithScraperAPI(phone, apiKey) {
+  const base64Phone = Buffer.from(phone).toString('base64');
+  const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
+  const targetUrl = `https://ab.new9plus.com/wp-admin/admin-ajax.php?action=alosh_search&phone=${phone}&nocache=${Date.now()}`;
+
+  const browserHeaders = {
+    'accept': '*/*',
+    'accept-language': 'ar,en;q=0.9',
+    'referer': dynamicReferer,
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+  };
+
+  // ✅ المحاولة 1: ScraperAPI مع render=true
   try {
-    const query = req.method === 'GET' ? req.query.query : req.body.query;
+    const url1 = `https://api.scraperapi.com/?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&render=true&timeout=15000`;
+    const response = await fetchWithTimeout(url1, { method: 'GET', headers: browserHeaders }, 15000);
+    if (response.ok) {
+      const content = await response.text();
+      let extracted = extractNamesFromResponse(content);
+      if (extracted.length > 0) return { names: extracted, source: 'scraperapi_render' };
+    }
+  } catch (e) {
+    console.log('محاولة 1 فشلت:', e.message);
+  }
+
+  // ✅ المحاولة 2: ScraperAPI مع render=false
+  try {
+    const url2 = `https://api.scraperapi.com/?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&render=false`;
+    const response = await fetchWithTimeout(url2, { method: 'GET', headers: browserHeaders }, 10000);
+    if (response.ok) {
+      const content = await response.text();
+      let extracted;
+      try {
+        extracted = extractNamesFromJSON(JSON.parse(content));
+      } catch {
+        extracted = extractNamesFromResponse(content);
+      }
+      if (extracted.length > 0) return { names: extracted, source: 'scraperapi_no_render' };
+    }
+  } catch (e) {
+    console.log('محاولة 2 فشلت:', e.message);
+  }
+
+  // ✅ المحاولة 3: مباشرة بدون ScraperAPI (قد تنجح في بعض البيئات)
+  try {
+    const response = await fetchWithTimeout(targetUrl, {
+      method: 'GET',
+      headers: browserHeaders
+    }, 10000);
+    if (response.ok) {
+      const content = await response.text();
+      let extracted = extractNamesFromResponse(content);
+      if (extracted.length > 0) return { names: extracted, source: 'direct' };
+    }
+  } catch (e) {
+    console.log('محاولة 3 فشلت:', e.message);
+  }
+
+  return null;
+}
+
+// ==========================================================
+// 🔑 المفتاح مضمن هنا مباشرة
+// ==========================================================
+const SCRAPINGAPI_API_KEY = "1432f28f4c66602b7020a6f1bf5fd9ba";
+
+// إنشاء نسخة الكاش
+const cache = new MemoryCache();
+
+// ==========================================================
+// 🚀 Handler الرئيسي لـ Vercel
+// ==========================================================
+module.exports = async (req, res) => {
+  // إعداد CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // Rate Limiting
+  const ip = req.headers['cf-connecting-ip'] || 
+             req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+             req.socket?.remoteAddress || 
+             'anonymous';
+  
+  const rateLimitKey = `ratelimit_${ip}`;
+  const lastRequest = cache.match(rateLimitKey);
+  
+  if (lastRequest) {
+    const timeDiff = Date.now() - lastRequest;
+    if (timeDiff < 3000) {
+      return res.status(429).json({
+        success: false,
+        results: [],
+        total: 0,
+        error: 'مهلاً! الرجاء الانتظار',
+        message: '⏳ يرجى الانتظار 3 ثواني بين عمليات البحث'
+      });
+    }
+  }
+  cache.put(rateLimitKey, Date.now());
+
+  try {
+    const query = req.method === 'GET' ? req.query.query : req.body?.query;
 
     if (!query) {
       return res.status(200).json({ success: false, results: [], total: 0, error: 'البحث فارغ' });
@@ -215,53 +278,29 @@ app.all('/api/search', rateLimiter, async (req, res) => {
     const cachedData = cache.match(cacheKey);
 
     if (cachedData) {
-      return res.status(200).set('X-Cache-Status', 'HIT').json(cachedData);
+      res.setHeader('X-Cache-Status', 'HIT');
+      return res.status(200).json(cachedData);
     }
 
-    let names = [];
-    let success = false;
-    let source = '';
+    // ✅ محاولة البحث مع البدائل
+    const result = await searchWithScraperAPI(scrapePhone, SCRAPINGAPI_API_KEY);
 
-    const base64Phone = Buffer.from(scrapePhone).toString('base64');
-    const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
-    const targetUrl = `https://ab.new9plus.com/wp-admin/admin-ajax.php?action=alosh_search&phone=${scrapePhone}&nocache=${Date.now()}`;
-
-    const browserHeaders = {
-      'accept': '*/*',
-      'accept-language': 'ar,en;q=0.9',
-      'referer': dynamicReferer,
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-    };
-
-    if (!SCRAPINGAPI_API_KEY) {
-      return res.status(200).json({ success: false, results: [], total: 0, error: 'مفتاح ScraperAPI غير مضبوط' });
-    }
-
-    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
-
-    try {
-      const response = await fetchWithTimeout(scrapingApiUrl, { method: 'GET', headers: browserHeaders }, 7000);
-      if (response.ok) {
-        const responseContent = await response.text();
-        let extracted;
-        try {
-          extracted = extractNamesFromJSON(JSON.parse(responseContent));
-        } catch {
-          extracted = extractNamesFromResponse(responseContent);
+    if (!result || result.names.length === 0) {
+      return res.status(200).json({ 
+        success: false, 
+        results: [], 
+        total: 0, 
+        error: '❌ لم يتم العثور على نتائج',
+        message: 'تأكد من صحة الرقم أو حاول مرة أخرى',
+        debug: {
+          phone: scrapePhone,
+          provider: provider,
+          apiKeyUsed: SCRAPINGAPI_API_KEY ? '✅ موجود' : '❌ مفقود'
         }
-        if (extracted.length > 0) {
-          names = extracted;
-          success = true;
-          source = 'scrapingapi';
-        }
-      }
-    } catch (e) {}
-
-    if (!success || names.length === 0) {
-      return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
+      });
     }
 
-    const results = names.map(name => ({
+    const results = result.names.map(name => ({
       name,
       phone: databasePhone,
       source: 'ScrapingAPI',
@@ -273,7 +312,7 @@ app.all('/api/search', rateLimiter, async (req, res) => {
       success: true,
       results,
       total: results.length,
-      source,
+      source: result.source,
       cached_at: new Date().toISOString()
     };
 
@@ -281,10 +320,12 @@ app.all('/api/search', rateLimiter, async (req, res) => {
     return res.status(200).json(finalResponseData);
 
   } catch (e) {
-    return res.status(500).json({ success: false, results: [], total: 0, error: e.message });
+    return res.status(500).json({ 
+      success: false, 
+      results: [], 
+      total: 0, 
+      error: '⚠️ خطأ في الخادم',
+      message: e.message 
+    });
   }
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+};
