@@ -1,7 +1,7 @@
 const NodeCache = require('node-cache');
 
 // ==========================================================
-// 📊 نظام الكاش (Memory Cache)
+// 📊 نظام الكاش (Memory Cache) - مدة الكاش 2 يوم (48 ساعة)
 // ==========================================================
 class MemoryCache {
   constructor() {
@@ -116,7 +116,8 @@ function detectProviderAndCountry(fullPhone, cleanPhoneYemen) {
   return 'رقم دولي';
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+// ⏱️ الـ Timeout الافتراضي 7 ثوانٍ (7000ms)
+async function fetchWithTimeout(url, options = {}, timeoutMs = 7000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -129,130 +130,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   }
 }
 
-// ==========================================================
-// 🔧 محاولة البدائل المتعددة مع ScrapingAPI
-// ==========================================================
-async function searchWithScraperAPI(phone, apiKey) {
-  console.log(`🔍 بدء البحث عن الرقم: ${phone}`);
-  
-  const targetUrl = `https://ab.new9plus.com/wp-admin/admin-ajax.php?action=alosh_search&phone=${phone}&nocache=${Date.now()}`;
-  
-  const browserHeaders = {
-    'accept': '*/*',
-    'accept-language': 'ar,en;q=0.9',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  };
-
-  // ✅ المحاولة 1: ScrapingAPI مع render=true
-  try {
-    console.log('📡 المحاولة 1: ScrapingAPI مع render=true');
-    const url1 = `https://api.scrapingapi.com/?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&render=true&timeout=20000&wait=3000`;
-    const response = await fetchWithTimeout(url1, { 
-      method: 'GET', 
-      headers: browserHeaders 
-    }, 25000);
-    
-    if (response.ok) {
-      const content = await response.text();
-      console.log('✅ تم استلام رد من ScrapingAPI (render=true), الطول:', content.length);
-      let extracted = extractNamesFromResponse(content);
-      if (extracted.length > 0) {
-        console.log(`✅ تم استخراج ${extracted.length} اسم`);
-        return { names: extracted, source: 'scraperapi_render' };
-      }
-    } else {
-      console.log('❌ فشل المحاولة 1: الحالة', response.status);
-    }
-  } catch (e) {
-    console.log('❌ المحاولة 1 فشلت:', e.message);
-  }
-
-  // ✅ المحاولة 2: ScrapingAPI مع render=false
-  try {
-    console.log('📡 المحاولة 2: ScrapingAPI مع render=false');
-    const url2 = `https://api.scrapingapi.com/?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&render=false&timeout=15000`;
-    const response = await fetchWithTimeout(url2, { 
-      method: 'GET', 
-      headers: browserHeaders 
-    }, 20000);
-    
-    if (response.ok) {
-      const content = await response.text();
-      console.log('✅ تم استلام رد من ScrapingAPI (render=false), الطول:', content.length);
-      let extracted;
-      try {
-        extracted = extractNamesFromJSON(JSON.parse(content));
-      } catch {
-        extracted = extractNamesFromResponse(content);
-      }
-      if (extracted.length > 0) {
-        console.log(`✅ تم استخراج ${extracted.length} اسم`);
-        return { names: extracted, source: 'scraperapi_no_render' };
-      }
-    } else {
-      console.log('❌ فشل المحاولة 2: الحالة', response.status);
-    }
-  } catch (e) {
-    console.log('❌ المحاولة 2 فشلت:', e.message);
-  }
-
-  // ✅ المحاولة 3: ScrapingAPI مع proxy فقط
-  try {
-    console.log('📡 المحاولة 3: ScrapingAPI مع proxy فقط');
-    const url3 = `https://api.scrapingapi.com/?api_key=${apiKey}&url=${encodeURIComponent(targetUrl)}&proxy_country=US`;
-    const response = await fetchWithTimeout(url3, { 
-      method: 'GET', 
-      headers: browserHeaders 
-    }, 15000);
-    
-    if (response.ok) {
-      const content = await response.text();
-      console.log('✅ تم استلام رد من ScrapingAPI (proxy), الطول:', content.length);
-      let extracted = extractNamesFromResponse(content);
-      if (extracted.length > 0) {
-        console.log(`✅ تم استخراج ${extracted.length} اسم`);
-        return { names: extracted, source: 'scraperapi_proxy' };
-      }
-    } else {
-      console.log('❌ فشل المحاولة 3: الحالة', response.status);
-    }
-  } catch (e) {
-    console.log('❌ المحاولة 3 فشلت:', e.message);
-  }
-
-  // ✅ المحاولة 4: محاولة مباشرة (كحل أخير)
-  try {
-    console.log('📡 المحاولة 4: محاولة مباشرة');
-    const response = await fetchWithTimeout(targetUrl, {
-      method: 'GET',
-      headers: browserHeaders
-    }, 10000);
-    if (response.ok) {
-      const content = await response.text();
-      console.log('✅ تم استلام رد مباشر, الطول:', content.length);
-      let extracted = extractNamesFromResponse(content);
-      if (extracted.length > 0) {
-        console.log(`✅ تم استخراج ${extracted.length} اسم`);
-        return { names: extracted, source: 'direct' };
-      }
-    } else {
-      console.log('❌ فشل المحاولة 4: الحالة', response.status);
-    }
-  } catch (e) {
-    console.log('❌ المحاولة 4 فشلت:', e.message);
-  }
-
-  console.log('❌ جميع المحاولات فشلت في جلب البيانات');
-  return null;
-}
-
-// ==========================================================
-// 🔑 المفتاح مضمن هنا مباشرة
-// ==========================================================
-const SCRAPINGAPI_API_KEY = "1432f28f4c66602b7020a6f1bf5fd9ba";
-
-// إنشاء نسخة الكاش
+// إنشاء نسخة الكاش (تُستخدم لكل الطلبات)
 const cache = new MemoryCache();
+const SCRAPINGAPI_API_KEY = process.env.SCRAPINGAPI_API_KEY || "1432f28f4c66602b7020a6f1bf5fd9ba";
 
 // ==========================================================
 // 🚀 Handler الرئيسي لـ Vercel
@@ -263,11 +143,13 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+  // معالجة طلبات OPTIONS (preflight)
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // Rate Limiting
+  // إعداد Rate Limiting بسيط (3 ثواني بين الطلبات)
+  // Vercel لا يدوم معها Rate Limiting بالكاش، لكن نستخدمه هنا
   const ip = req.headers['cf-connecting-ip'] || 
              req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
              req.socket?.remoteAddress || 
@@ -327,40 +209,58 @@ module.exports = async (req, res) => {
       scrapePhone = rawDigits;
     }
 
-    console.log(`📱 معالجة الرقم: ${databasePhone} (${scrapePhone}) - ${provider}`);
-
     const cacheKey = `phone_${databasePhone}`;
     const cachedData = cache.match(cacheKey);
 
     if (cachedData) {
-      console.log('💾 استخدام البيانات المخزنة مؤقتاً');
       res.setHeader('X-Cache-Status', 'HIT');
       return res.status(200).json(cachedData);
     }
 
-    // ✅ محاولة البحث مع البدائل
-    const result = await searchWithScraperAPI(scrapePhone, SCRAPINGAPI_API_KEY);
+    let names = [];
+    let success = false;
+    let source = '';
 
-    if (!result || result.names.length === 0) {
-      console.log('❌ لم يتم العثور على نتائج');
-      return res.status(200).json({ 
-        success: false, 
-        results: [], 
-        total: 0, 
-        error: '❌ لم يتم العثور على نتائج',
-        message: 'تأكد من صحة الرقم أو حاول مرة أخرى',
-        debug: {
-          phone: scrapePhone,
-          provider: provider,
-          apiKeyUsed: SCRAPINGAPI_API_KEY ? '✅ موجود' : '❌ مفقود',
-          apiKeyLength: SCRAPINGAPI_API_KEY?.length || 0
-        }
-      });
+    const base64Phone = Buffer.from(scrapePhone).toString('base64');
+    const dynamicReferer = `https://ab.new9plus.com/calle/?res_id=K${base64Phone}%3D%3D`;
+    const targetUrl = `https://ab.new9plus.com/wp-admin/admin-ajax.php?action=alosh_search&phone=${scrapePhone}&nocache=${Date.now()}`;
+
+    const browserHeaders = {
+      'accept': '*/*',
+      'accept-language': 'ar,en;q=0.9',
+      'referer': dynamicReferer,
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+    };
+
+    if (!SCRAPINGAPI_API_KEY) {
+      return res.status(200).json({ success: false, results: [], total: 0, error: 'مفتاح ScraperAPI غير مضبوط' });
     }
 
-    console.log(`✅ نجح البحث: ${result.names.length} اسم مستخرج`);
+    const scrapingApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPINGAPI_API_KEY}&url=${encodeURIComponent(targetUrl)}&render=false`;
 
-    const results = result.names.map(name => ({
+    try {
+      const response = await fetchWithTimeout(scrapingApiUrl, { method: 'GET', headers: browserHeaders }, 7000);
+      if (response.ok) {
+        const responseContent = await response.text();
+        let extracted;
+        try {
+          extracted = extractNamesFromJSON(JSON.parse(responseContent));
+        } catch {
+          extracted = extractNamesFromResponse(responseContent);
+        }
+        if (extracted.length > 0) {
+          names = extracted;
+          success = true;
+          source = 'scrapingapi';
+        }
+      }
+    } catch (e) {}
+
+    if (!success || names.length === 0) {
+      return res.status(200).json({ success: false, results: [], total: 0, error: 'لم يتم العثور على نتائج' });
+    }
+
+    const results = names.map(name => ({
       name,
       phone: databasePhone,
       source: 'ScrapingAPI',
@@ -372,7 +272,7 @@ module.exports = async (req, res) => {
       success: true,
       results,
       total: results.length,
-      source: result.source,
+      source,
       cached_at: new Date().toISOString()
     };
 
@@ -380,13 +280,6 @@ module.exports = async (req, res) => {
     return res.status(200).json(finalResponseData);
 
   } catch (e) {
-    console.error('❌ خطأ عام:', e.message);
-    return res.status(500).json({ 
-      success: false, 
-      results: [], 
-      total: 0, 
-      error: '⚠️ خطأ في الخادم',
-      message: e.message 
-    });
+    return res.status(500).json({ success: false, results: [], total: 0, error: e.message });
   }
 };
